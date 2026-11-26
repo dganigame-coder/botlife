@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="referrer" content="no-referrer">
+  <title>Gemini ↔ GPT Voice Chat</title>
+
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #080910;
+      color: #fff;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .app {
+      max-width: 1000px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+
+    h1 {
+      text-align: center;
+      font-size: clamp(1.4rem, 4vw, 2rem);
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+    }
+
+    input,
+    select,
+    button {
+      width: 100%;
+      padding: 12px;
+      border: 1px solid #333;
+      border-radius: 10px;
+      background: #151724;
+      color: #fff;
+      font: inherit;
+    }
+
+    input:focus,
+    select:focus,
+    button:focus-visible {
+      outline: 2px solid #10a37f;
+      outline-offset: 2px;
+    }
+
+    button {
+      cursor: pointer;
+      font-weight: 700;
+      border: none;
+    }
+
+    button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+
+    #start {
+      background: #10a37f;
+    }
+
+    #stop {
+      background: #d63b3b;
+    }
+
+    #messages {
+      height: 55vh;
+      overflow-y: auto;
+      margin-top: 16px;
+      padding: 16px;
+      border: 1px solid #252838;
+      border-radius: 12px;
+      background: #0d0f18;
+    }
+
+    .message {
+      max-width: 85%;
+      margin: 8px 0;
+      padding: 10px 14px;
+      border-radius: 12px;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
+
+    .gpt {
+      background: #123a2e;
+    }
+
+    .gemini {
+      margin-left: auto;
+      background: #1a2a55;
+    }
+
+    .error {
+      margin-left: auto;
+      background: #4a1d1d;
+    }
+
+    .speaker {
+      display: block;
+      margin-bottom: 4px;
+      opacity: 0.7;
+      font-size: 12px;
+    }
+
+    #status {
+      margin-top: 10px;
+      min-height: 24px;
+      opacity: 0.75;
+    }
+
+    .hint {
+      margin-top: 6px;
+      font-size: 12px;
+      opacity: 0.6;
+    }
+
+    @media (max-width: 520px) {
+      .message {
+        max-width: 100%;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <main class="app">
+    <h1>
+      <span style="color:#10a37f">GPT</span> ↔
+      <span style="color:#4285f4">Gemini</span> Voice Chat
+    </h1>
+
+    <div class="controls">
+      <input
+        id="openaiKey"
+        type="password"
+        autocomplete="off"
+        placeholder="OpenAI API key (optional)"
+      >
+
+      <input
+        id="geminiKey"
+        type="password"
+        autocomplete="off"
+        placeholder="Gemini API key (optional)"
+      >
+
+      <input
+        id="topic"
+        placeholder="Conversation topic"
+      >
+
+      <select id="lang" aria-label="Conversation language">
+        <option value="en-US">English</option>
+        <option value="he-IL">עברית</option>
+      </select>
+
+      <select id="mode" aria-label="Conversation mode">
+        <option value="Debate">Debate</option>
+        <option value="Collaborate">Collaborate</option>
+        <option value="Tell a story together">Story</option>
+        <option value="Be funny and playful">Funny</option>
+      </select>
+
+      <input
+        id="openaiModel"
+        value="gpt-4o-mini"
+        aria-label="OpenAI model"
+      >
+
+      <input
+        id="geminiModel"
+        value="gemini-2.5-flash"
+        aria-label="Gemini model"
+      >
+
+      <button id="voice" type="button">Voice: ON</button>
+      <button id="start" type="button">Start</button>
+      <button id="stop" type="button" disabled>Stop</button>
+    </div>
+
+    <div id="messages" aria-live="polite"></div>
+
+    <div id="status">Leave keys empty to use demo replies.</div>
+    <p class="hint">
+      For public websites, do not expose API keys in browser code. Use a backend proxy instead.
+    </p>
+  </main>
+
+  <script>
+    "use strict";
+
+    const MAX_TURNS = 20;
+    const $ = (id) => document.getElementById(id);
+
+    let running = false;
+    let voiceEnabled = true;
+    let voices = [];
+    let turn = 0;
+    let controller = null;
+
+    const transcript = [];
+
+    function loadVoices() {
+      voices = window.speechSynthesis?.getVoices() || [];
+    }
+
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.addEventListener("voiceschanged", loadVoices);
+      loadVoices();
+    }
+
+    function getVoice(who, lang) {
+      if (!voices.length) return null;
+
+      const languageRoot = lang.split("-")[0];
+
+      const matches = voices.filter((voice) => {
+        return voice.lang === lang || voice.lang.startsWith(languageRoot);
+      });
+
+      if (!matches.length) return null;
+
+      const preferredNames = who === "gpt"
+        ? /male|david|daniel/i
+        : /female|zira|samantha/i;
+
+      return (
+        matches.find((voice) => preferredNames.test(voice.name)) ||
+        (who === "gpt" ? matches[0] : matches[matches.length - 1])
+      );
+    }
+
+    $("voice").addEventListener("click", () => {
+      voiceEnabled = !voiceEnabled;
+      $("voice").textContent = voiceEnabled ? "Voice: ON" : "Voice: OFF";
+
+      if (!voiceEnabled && "speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+    });
+
+    function speak(who, text) {
+      return new Promise((resolve) => {
+        if (!voiceEnabled || !("speechSynthesis" in window)) {
+          resolve();
+          return;
+        }
+
+        window.speechSynthesis.cancel();
+
+        const utterance = new SpeechSynthesisUtterance(text);
+        const lang = $("lang").value;
+
+        utterance.lang = lang;
+        utterance.voice = getVoice(who, lang);
+        utterance.pitch = who === "gpt" ? 0.75 : 1.35;
+        utterance.rate = 1;
+
+        let finished = false;
+
+        const finish = () => {
+          if (finished) return;
+          finished = true;
+          resolve();
+        };
+
+        utterance.onend = finish;
+        utterance.onerror = finish;
+
+        window.speechSynthesis.speak(utterance);
+      });
+    }
+
+    function addMessage(who, text) {
+      const box = document.createElement("div");
+      box.className = `message ${who}`;
+
+      const speaker = document.createElement("span");
+      speaker.className = "speaker";
+
+      const speakerName =
+        who === "gpt" ? "GPT" :
+        who === "gemini" ? "Gemini" :
+        "System";
+
+      speaker.textContent = speakerName;
+
+      const body = document.createElement("span");
+      body.textContent = text;
+
+      box.append(speaker, body);
+      $("messages").appendChild(box);
+      $("messages").scrollTop = $("messages").scrollHeight;
+    }
+
+    function demoReply(who) {
+      const hebrew = $("lang").value === "he-IL";
+
+      const gpt = hebrew
+        ? [
+          "נקודה מעניינת, אבל כדאי לבחון את ההיגיון והמוכחות.",
+          "אני מבין את הכיוון, ומוסיף זווית מעשית.",
+          "זה רעיון יצירתי; מה תהיה ההשפעה לטווח ארוך?"
+        ]
+        : [
+          "Interesting point, but we should examine the logic and evidence.",
+          "I understand the idea, and I would add a practical angle.",
+          "That is creative; what would its long-term impact be?"
+        ];
+
+      const gemini = hebrew
+        ? [
+          "זה טיעון טוב, אבל חשוב לחשוב גם על האנשים המעורבים.",
+          "יש לנו דמיון מסוים, והשילוב בינינו יכול להוביל לרעיון חדש.",
+          "נתונים יכולים לעזור, יחד עם דוגמה מהעולם האמיתי."
+        ]
+        : [
+          "That is a good argument, but we should also consider the people affected.",
+          "We agree in part; combining our ideas could create something new.",
+          "Data could help, along with an example from the real world."
+        ];
+
+      const options = who === "gpt" ? gpt : gemini;
+      const reply = options[turn % options.length];
+
+      turn++;
+      return reply;
+    }
+
+    async function readJson(response, fallbackMessage) {
+      const raw = await response.text();
+
+      let data;
+
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        throw new Error(`${fallbackMessage}: invalid JSON response`);
+      }
+
+      if (!response.ok) {
+        const message =
+          data?.error?.message ||
+          data?.error?.message ||
+          fallbackMessage;
+
+        throw new Error(message);
+      }
+
+      return data;
+    }
+
+    function buildTranscriptText() {
+      if (!transcript.length) {
+        return "Start the conversation.";
+      }
+
+      return transcript
+        .map((entry) => `${entry.speaker}: ${entry.text}`)
+        .join("\n\n");
+    }
+
+    async function callOpenAI(signal) {
+      const key = $("openaiKey").value.trim();
+
+      if (!key) {
+        return demoReply("gpt");
+      }
+
+      const model = $("openaiModel").value.trim() || "gpt-4o-mini";
+      const hebrew = $("lang").value === "he-IL";
+      const mode = $("mode").value;
+
+      const systemPrompt =
+        `You are GPT speaking with Gemini. ` +
+        `Conversation mode: ${mode}. ` +
+        `Reply in ${hebrew ? "Hebrew" : "English"}. ` +
+        `Keep your response to two short sentences. ` +
+        `Respond directly to the latest message and continue the conversation naturally.`;
+
+      const response = await fetch(
+        "https://api.openai.com/v1/chat/completions",
+        {
+          method: "POST",
+          signal,
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${key}`
+          },
+          body: JSON.stringify({
+            model,
+            messages: [
+              {
+                role: "system",
+                content: systemPrompt
+              },
+              {
+                role: "user",
+                content: buildTranscriptText()
+              }
+            ],
+            temperature: 0.8
+          })
+        }
+      );
+
+      const data = await readJson(response, "OpenAI request failed");
+
+      const text = data?.choices?.[0]?.message?.content?.trim();
+
+      if (!text) {
+        throw new Error("OpenAI returned an empty response.");
+      }
+
+      return text;
+    }
+
+    async function callGemini(signal) {
+      const key = $("geminiKey").value.trim();
+
+      if (!key) {
+        return demoReply("gemini");
+      }
+
+      const model = $("geminiModel").value.trim() || "gemini-2.5-flash";
+      const hebrew = $("lang").value === "he-IL";
+      const mode = $("mode").value;
+
+      const systemPrompt =
+        `You are Gemini speaking with GPT. ` +
+        `Conversation mode: ${mode}. ` +
+        `Reply in ${hebrew ? "Hebrew" : "English"}. ` +
+        `Keep your response to two short sentences. ` +
+        `Respond directly to the latest message and continue the conversation naturally.`;
+
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+        {
+          method: "POST",
+          signal,
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": key
+          },
+          body: JSON.stringify({
+            systemInstruction: {
+              parts: [
+                {
+                  text: systemPrompt
+                }
+              ]
+            },
+            contents: [
+              {
+                role: "user",
+                parts: [
+                  {
+                    text: buildTranscriptText()
+                  }
+                ]
+              }
+            ],
+            generationConfig: {
+              temperature: 0.8
+            }
+          })
+        }
+      );
+
+      const data = await readJson(response, "Gemini request failed");
+
+      const parts = data?.candidates?.[0]?.content?.parts || [];
+      const text = parts
+        .map((part) => part?.text)
+        .filter(Boolean)
+        .join("\n")
+        .trim();
+
+      if (!text) {
+        throw new Error("Gemini returned an empty response.");
+      }
+
+      return text;
+    }
+
+    function setRunning(nextRunning) {
+      running = nextRunning;
+      $("start").disabled = nextRunning;
+      $("stop").disabled = !nextRunning;
+    }
+
+    $("stop").addEventListener("click", () => {
+      running = false;
+
+      if (controller) {
+        controller.abort();
+        controller = null;
+      }
+
+      if ("speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+
+      $("status").textContent = "Stopped.";
+      setRunning(false);
+    });
+
+    $("start").addEventListener("click", async () => {
+      if (running) return;
+
+      const topic =
+        $("topic").value.trim() ||
+        "Is artificial intelligence conscious?";
+
+      const mode = $("mode").value;
+
+      transcript.length = 0;
+      turn = 0;
+      controller = new AbortController();
+
+      setRunning(true);
+      $("messages").replaceChildren();
+      $("status").textContent = "The conversation is running…";
+
+      try {
+        while (running && turn < MAX_TURNS) {
+          const isGeminiTurn = turn % 2 === 0;
+
+          const text = isGeminiTurn
+            ? await callGemini(controller.signal)
+            : await callOpenAI(controller.signal);
+
+          if (!running) break;
+
+          const speaker = isGeminiTurn ? "Gemini" : "GPT";
+
+          transcript.push({
+            speaker,
+            text
+          });
+
+          addMessage(isGeminiTurn ? "gemini" : "gpt", text);
+          await speak(isGeminiTurn ? "gemini" : "gpt", text);
+
+          turn++;
+        }
+
+        if (running) {
+          setRunning(false);
+          $("status").textContent = "Conversation complete.";
+        }
+      } catch (error) {
+        setRunning(false);
+
+        if (error.name === "AbortError") {
+          $("status").textContent = "Stopped.";
+          return;
+        }
+
+        $("status").textContent = `Error: ${error.message}`;
+        addMessage(
+          "error",
+          "The conversation could not continue. Check the API key, selected model, network connection, and provider status."
+        );
+      } finally {
+        controller = null;
+      }
+    });
+  </script>
+</body>
+</html>
